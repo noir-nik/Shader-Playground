@@ -23,4 +23,5 @@ public:
 
 	static void PollEvents();
 	static void WaitEvents();
+	static void WaitEventsTimeout(double timeout);
 };

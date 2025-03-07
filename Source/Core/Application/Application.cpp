@@ -1,7 +1,6 @@
 module;
 #include "Log/LogMacros.hpp"
 #include "Misc/CheckVulkanResult.hpp"
-#include "Misc/VertexShaderCode.h"
 #include "Shaders/PushConstants.h"
 module Application;
 import std;
@@ -10,13 +9,23 @@ import VulkanRHI;
 import MessageCallbacks;
 import Window;
 import WindowManager;
+import WindowState;
 import Utils;
 import VulkanExtensions;
-import Constants;
+import ShaderCodes;
 import ShaderCompiler;
+import FileManager;
+import ApplicationEnums;
+import ApplicationGlobalData;
+import ParseUtils;
 import Log;
 
 using u32 = std::uint32_t;
+
+#define LOG_VERBOSE(fmt, ...) \
+	if (gApp->user_options.bVerbose) { \
+		LOG_INFO(fmt, ##__VA_ARGS__); \
+	}
 
 struct PhysicalDevice : public VulkanRHI::PhysicalDevice {
 	PhysicalDevice() {}
@@ -32,6 +41,53 @@ struct PhysicalDevice : public VulkanRHI::PhysicalDevice {
 	u32 graphics_queue_family_index = std::numeric_limits<u32>::max();
 };
 
+struct FragmentShaderManager {
+	void Update(std::string_view const fragment_shader_code) {
+		path             = fragment_shader_code;
+		path_string      = path.string();
+		file_version     = Utils::GetFileVersion(path_string);
+		pipeline_version = -1;
+	}
+
+	bool UpdateFileVersion() {
+		int new_version = Utils::GetFileVersion(path_string);
+		if (new_version > file_version) {
+			file_version = new_version;
+			return true;
+		}
+		return false;
+	}
+
+	bool IsUpToDate(int current_file_version) const { return file_version >= current_file_version; }
+
+	auto GetPath() -> std::filesystem::path& { return path; }
+	auto GetPath() const -> std::filesystem::path const& { return path; }
+	auto GetPathString() -> std::string& { return path_string; }
+	auto GetPathString() const -> std::string const& { return path_string; }
+	auto GetFileVersion() -> int& { return file_version; }
+	auto GetFileVersion() const -> int const& { return file_version; }
+	auto GetPipelineVersion() -> int& { return pipeline_version; }
+	auto GetPipelineVersion() const -> int const& { return pipeline_version; }
+	bool GetDirty() const { return GetPipelineVersion() < GetFileVersion(); }
+
+	void SetFileVersion(int new_version) { file_version = new_version; }
+	void SetPipelineVersion(int new_version) { pipeline_version = new_version; }
+
+	std::filesystem::path path;
+	std::string           path_string;
+	int                   file_version     = -1;
+	int                   pipeline_version = -1;
+};
+
+struct UserOptions {
+	bool  bVerbose : 1           = false;
+	bool  bFlipY : 1             = true;
+	bool  bUpdateOnSave : 1      = true;
+	bool  bValidationEnabled : 1 = true;
+	bool  bResetWindowState : 1  = false;
+	float fps_limit              = 60.0f;
+};
+
 struct MainAppImpl {
 	static constexpr u32 kApiVersion = vk::ApiVersion13;
 
@@ -42,9 +98,9 @@ struct MainAppImpl {
 
 	~MainAppImpl();
 	void Run(int argc, char const* const* argv);
-	auto ParseArgs(int argc, char const* const* argv) -> char const*;
 	void Init();
 	void MainLoop();
+	void WaitForFrameTimeLeft();
 	void Destroy();
 	void CreateInstance();
 	void SelectPhysicalDevice();
@@ -60,29 +116,45 @@ struct MainAppImpl {
 
 	void CreatePipelineLayout();
 	void CreateVertexShaderModule();
+	void CreateFallbackPipeline();
 
-	// [[nodiscard]] auto CreatePipeline(std::string_view const fragment_shader_code) -> vk::Result;
-	[[nodiscard]] auto CreatePipeline(std::span<std::byte const> fragment_shader_code) -> vk::Result;
+	[[nodiscard]] auto CreatePipeline(std::span<std::byte const> fragment_shader_code, vk::Pipeline& pipeline) -> vk::Result;
+	[[nodiscard]] bool RecreateUserPipeline();
 
 	void RecordCommands();
-	void DrawWindow();
+	void UpdateViewport(int width, int height);
+	void UpdateMouse(int x, int y, int height);
+	void OnDrawWindow();
+	void UpdateTime();
 	void RecreateSwapchain(int width, int height);
 
 	auto GetAllocator() const -> vk::AllocationCallbacks const* { return allocator; }
 	auto GetPipelineCache() const -> vk::PipelineCache { return pipeline_cache; }
 
-	ShaderCompiler shader_compiler;
+	struct UserOptions user_options;
 
-	bool bVerbose           = false;
-	bool bValidationEnabled = true;
+	ShaderCompiler        shader_compiler;
+	FileManager           file_manager;
+	FragmentShaderManager fragment_shader;
 
-	std::string_view fragment_shader_path;
-
-	Window window{};
+	Window       window{};
+	WindowState  window_state;
+	int          WindowFramesToDraw = 0;
+	vk::Viewport viewport;
 	struct {
 		float x = 300.0f;
 		float y = 300.0f;
 	} mouse;
+
+	// startup time
+	std::chrono::time_point<std::chrono::high_resolution_clock> start_time;
+	std::chrono::time_point<std::chrono::high_resolution_clock> last_time;
+
+	float time;
+	float time_delta;
+	int   frame_index = 0;
+
+	bool bPaused = false;
 
 	vk::Instance                   instance{};
 	vk::AllocationCallbacks const* allocator{nullptr};
@@ -94,7 +166,7 @@ struct MainAppImpl {
 	PhysicalDevice                  physical_device{};
 	vk::Device                      device{};
 	VulkanRHI::Swapchain            swapchain{};
-	bool                            swapchain_dirty = false;
+	bool                            bSwapchainDirty = false;
 	vk::SurfaceKHR                  surface{};
 
 	vk::Queue queue{};
@@ -104,36 +176,68 @@ struct MainAppImpl {
 	// vk::DescriptorPool      descriptor_pool{};
 	// vk::DescriptorSet       descriptor_set{};
 
-	vk::PipelineLayout pipeline_layout{};
-	vk::Pipeline       pipeline{};
-	vk::ShaderModule   vertex_shader_module;
-	vk::ShaderModule   fragment_shader_module;
+	vk::PipelineLayout pipeline_layout;
+
+	// Owning
+	vk::Pipeline  user_pipeline{};
+	vk::Pipeline  fallback_pipeline;
+	vk::Pipeline* current_pipeline;
+
+	vk::ShaderModule vertex_shader_module;
+	vk::ShaderModule fragment_shader_module;
 };
 
-static MainAppImpl* gAppData = nullptr;
+static MainAppImpl* gApp = nullptr;
 
 static void FramebufferSizeCallback(Window* window, int width, int height) {
-	gAppData->swapchain_dirty = true;
+	gApp->bSwapchainDirty = true;
 	if (width <= 0 || height <= 0) return;
-	gAppData->RecreateSwapchain(width, height);
+	gApp->UpdateViewport(width, height);
+	gApp->RecreateSwapchain(width, height);
 }
 
 static void WindowRefreshCallback(Window* window) {
-	int x, y, width, height;
-	window->GetRect(x, y, width, height);
-	if (width <= 0 || height <= 0) return;
-	gAppData->DrawWindow();
+	gApp->OnDrawWindow();
 }
 
 static void CursorPosCallback(Window* window, double xpos, double ypos) {
-	gAppData->mouse.x = static_cast<float>(xpos);
-	gAppData->mouse.y = static_cast<float>(ypos);
+	int x, y, width, height;
+	window->GetRect(x, y, width, height);
+	gApp->UpdateMouse(xpos, ypos, height);
 }
 
-static void KeyCallback(Window* window, int key, int scancode, int action, int mods) {
-	switch (key) {
-	case 256:
-		window->SetShouldClose(true);
+static void KeyCallback(Window* window, int keycode, int scancode, int action, int mods) {
+	switch (Key(keycode)) {
+	case Key::eEscape:
+		if (Action(action) == Action::ePress) {
+			window->SetShouldClose(true);
+		}
+		break;
+	case Key::eF5: {
+		if (Action(action) == Action::ePress) {
+			gApp->fragment_shader.UpdateFileVersion();
+		}
+	} break;
+	case Key::eF11: {
+		if (Action(action) == Action::ePress) {
+			if (window->GetWindowMode() == WindowMode::eWindowed) {
+				window->SetWindowMode(WindowMode::eWindowedFullscreen);
+			} else {
+				window->SetWindowMode(WindowMode::eWindowed);
+			}
+		}
+	}
+	case Key::eO: {
+		// Open file dialog
+		// if (mods & Mod::eControl && Action(action) == Action::ePress) {
+		// }
+	}
+	case Key::eQ: [[fallthrough]];
+	case Key::eP: {
+		if (Action(action) == Action::ePress)
+			gApp->bPaused = !gApp->bPaused;
+	}
+	default:
 		break;
 	}
 }
@@ -141,14 +245,40 @@ static void KeyCallback(Window* window, int key, int scancode, int action, int m
 void MainAppImpl::Init() {
 	WindowManager::SetErrorCallback(WindowErrorCallback);
 	WindowManager::Init();
-	constexpr u32 title_buffer_size = 256 + Constants::kApplicationTitle.size() + 3;
-	char          title_buffer[title_buffer_size];
+	char        title_buffer[256];
+	std::size_t pos = fragment_shader.path_string.find_last_of('/');
+	char const* file_name =
+		pos == std::string::npos
+			? fragment_shader.path_string.data()
+			: fragment_shader.path_string.data() + pos + 1;
 
-	std::snprintf(title_buffer, sizeof(title_buffer) - 1, "%ls - %s",
-				  std::filesystem::path(fragment_shader_path).filename().c_str(),
-				  Constants::kApplicationTitle.data());
+	std::snprintf(title_buffer, sizeof(title_buffer) - 1, "%s - %s",
+				  file_name,
+				  gGlobalData.application_title.data());
 
-	window.Init({.x = 30, .y = 30, .width = 800, .height = 600, .title = title_buffer});
+	WindowMode initial_window_mode = WindowMode::eWindowed;
+	WindowRect initial_window_rect{.x = kWindowDontCare, .y = kWindowDontCare, .width = 800, .height = 600};
+	if (!user_options.bResetWindowState) {
+		window_state = WindowState::FromFile(gGlobalData.window_state_path).value_or(WindowState{});
+		if (window_state.x != kWindowDontCare) initial_window_rect.x = window_state.x;
+		if (window_state.y != kWindowDontCare) initial_window_rect.y = window_state.y;
+		if (window_state.width != kWindowDontCare) initial_window_rect.width = window_state.width;
+		if (window_state.height != kWindowDontCare) initial_window_rect.height = window_state.height;
+		if (window_state.mode != WindowMode::eMaxEnum) initial_window_mode = window_state.mode;
+		if (initial_window_rect.x < 30) initial_window_rect.x = 30;
+		if (initial_window_rect.y < 30) initial_window_rect.y = 30;
+		if (initial_window_rect.width < 100) initial_window_rect.width = 100;
+		if (initial_window_rect.height < 100) initial_window_rect.height = 100;
+	}
+
+	window.Init({
+		.x      = initial_window_rect.x,
+		.y      = initial_window_rect.y,
+		.width  = initial_window_rect.width,
+		.height = initial_window_rect.height,
+		.mode   = initial_window_mode,
+		.title  = title_buffer,
+	});
 	window.GetWindowCallbacks().framebufferSizeCallback = FramebufferSizeCallback;
 	window.GetWindowCallbacks().windowRefreshCallback   = WindowRefreshCallback;
 	window.GetInputCallbacks().cursorPosCallback        = CursorPosCallback;
@@ -156,7 +286,9 @@ void MainAppImpl::Init() {
 	CreateInstance();
 
 	CHECK_RESULT(WindowManager::CreateWindowSurface(instance, reinterpret_cast<GLFWwindow*>(window.GetHandle()), GetAllocator(), &surface));
-
+	int x, y, width, height;
+	window.GetRect(x, y, width, height);
+	UpdateViewport(width, height);
 	SelectPhysicalDevice();
 	GetPhysicalDeviceInfo();
 
@@ -173,19 +305,12 @@ void MainAppImpl::Init() {
 
 	CreatePipelineLayout();
 	CreateVertexShaderModule();
-	// std::optional<std::string_view> shader_code = shader_compiler.LoadShader(fragment_shader_path);
-
-	std::optional<std::span<const std::byte>> shader_code = shader_compiler.LoadShader(fragment_shader_path);
-	if (!shader_code.has_value()) {
-		LOG_FATAL("Failed to read fragment shader file: %s", shader_compiler.GetErrorMessage().data());
+	CreateFallbackPipeline();
+	current_pipeline = &fallback_pipeline;
+	if (RecreateUserPipeline()) {
+		fragment_shader.SetPipelineVersion(fragment_shader.GetFileVersion());
+		current_pipeline = &user_pipeline;
 	}
-	if (shader_code.value().empty()) {
-		LOG_FATAL("Fragment shader file %s is empty!", fragment_shader_path.data());
-	}
-
-	// auto       shader_code = Utils::ReadBinaryFile(std::string(fragment_shader_path) + ".spv");
-	vk::Result result      = CreatePipeline(shader_code.value());
-	CHECK_RESULT(result);
 }
 
 MainAppImpl::~MainAppImpl() { Destroy(); }
@@ -195,7 +320,8 @@ void MainAppImpl::Destroy() {
 	if (device) {
 		CHECK_RESULT(device.waitIdle());
 
-		device.destroyPipeline(pipeline, GetAllocator());
+		device.destroyPipeline(user_pipeline, GetAllocator());
+		device.destroyPipeline(fallback_pipeline, GetAllocator());
 		device.destroyShaderModule(vertex_shader_module, GetAllocator());
 		device.destroyPipelineLayout(pipeline_layout, GetAllocator());
 
@@ -213,7 +339,7 @@ void MainAppImpl::Destroy() {
 
 	if (instance) {
 		instance.destroySurfaceKHR(surface, GetAllocator());
-		if (bValidationEnabled) {
+		if (user_options.bValidationEnabled) {
 			instance.destroyDebugUtilsMessengerEXT(debug_messenger, GetAllocator());
 		}
 		instance.destroy(GetAllocator());
@@ -231,7 +357,7 @@ void MainAppImpl::CreateInstance() {
 	char const** glfw_extensions = WindowManager::GetRequiredInstanceExtensions(&glfw_extensions_count);
 
 	std::vector<char const*> enabledExtensions(glfw_extensions, glfw_extensions + glfw_extensions_count);
-	if (bValidationEnabled) {
+	if (user_options.bValidationEnabled) {
 		enabled_layers = kEnabledLayers;
 		enabledExtensions.push_back(vk::EXTDebugUtilsExtensionName);
 	}
@@ -250,7 +376,7 @@ void MainAppImpl::CreateInstance() {
 	};
 
 	vk::InstanceCreateInfo info{
-		.pNext                   = bValidationEnabled ? &kDebugUtilsCreateInfo : nullptr,
+		.pNext                   = user_options.bValidationEnabled ? &kDebugUtilsCreateInfo : nullptr,
 		.pApplicationInfo        = &applicationInfo,
 		.enabledLayerCount       = static_cast<u32>(std::size(enabled_layers)),
 		.ppEnabledLayerNames     = enabled_layers.data(),
@@ -259,7 +385,7 @@ void MainAppImpl::CreateInstance() {
 	};
 	CHECK_RESULT(vk::createInstance(&info, GetAllocator(), &instance));
 
-	if (bValidationEnabled) {
+	if (user_options.bValidationEnabled) {
 		LoadInstanceDebugUtilsFunctionsEXT(instance);
 		CHECK_RESULT(instance.createDebugUtilsMessengerEXT(&kDebugUtilsCreateInfo, allocator, &debug_messenger));
 	}
@@ -274,16 +400,13 @@ void MainAppImpl::SelectPhysicalDevice() {
 		physical_device.Assign(device);
 		CHECK_RESULT(physical_device.GetDetails());
 		if (physical_device.IsSuitable(surface, kEnabledDeviceExtensions)) {
-			if (bVerbose) {
+			if (user_options.bVerbose) {
 			}
 			return;
 		}
 	}
 
-	std::printf("No suitable physical device found\n");
-	// std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-	std::getchar();
-	std::exit(1);
+	LOG_FATAL("No suitable physical device found\n");
 }
 
 void MainAppImpl::GetPhysicalDeviceInfo() {
@@ -337,6 +460,8 @@ void MainAppImpl::CreateSwapchain() {
 		.surface            = surface,
 		.extent             = {.width = static_cast<u32>(width), .height = static_cast<u32>(height)},
 		.queue_family_index = queue_family_index,
+		// .preferred_format   = vk::Format::eR8G8B8A8Srgb,
+		.preferred_format = vk::Format::eR8G8B8A8Unorm,
 	};
 	CHECK_RESULT(swapchain.Create(device, physical_device, info, GetAllocator()));
 }
@@ -359,12 +484,7 @@ void MainAppImpl::CreatePipelineLayout() {
 }
 
 void MainAppImpl::CreateVertexShaderModule() {
-	// std::optional<std::vector<std::byte>> shader_code = Utils::ReadBinaryFile(Constants::kVertexShaderPath);
-	// if (!shader_code.has_value()) {
-	// 	LOG_FATAL("Failed to read vertex shader file %s!", Constants::kVertexShaderPath.data());
-	// }
-
-	std::span<u32 const> shader_code = kQuadVertexShaderCode;
+	std::span<u32 const> shader_code = ShaderCodes::kVertexQuad;
 
 	vk::ShaderModuleCreateInfo info{
 		.codeSize = shader_code.size() * sizeof(shader_code[0]),
@@ -373,8 +493,48 @@ void MainAppImpl::CreateVertexShaderModule() {
 	CHECK_RESULT(device.createShaderModule(&info, GetAllocator(), &vertex_shader_module));
 }
 
+void MainAppImpl::CreateFallbackPipeline() {
+	// std::optional<std::span<std::byte const>> shader_code;
+	do {
+		{
+			// Load from file
+			std::optional<std::span<std::byte>> shader_code = file_manager.ReadBinaryFile(gGlobalData.fallback_fragment_spv_path);
+			if (shader_code.has_value() && !shader_code.value().empty()) {
+				LOG_VERBOSE("Loaded fallback fragment from file.");
+				vk::Result result = CreatePipeline(shader_code.value(), fallback_pipeline);
+				if (result == vk::Result::eSuccess) continue;
+			}
+		}
+		LOG_VERBOSE("Failed to create fallback fragment from loaded file, compiling...");
+		{
+			// Compile and load
+			if (shader_compiler.CompileShader(gGlobalData.fallback_fragment_shader_file_path, gGlobalData.fallback_fragment_spv_path)) {
+				std::optional<std::span<std::byte const>> shader_code = file_manager.ReadBinaryFile(gGlobalData.fallback_fragment_spv_path);
+				if (shader_code.has_value() && !shader_code.value().empty()) {
+					LOG_VERBOSE("Loaded compiled fallback fragment.");
+					vk::Result result = CreatePipeline(shader_code.value(), fallback_pipeline);
+					if (result == vk::Result::eSuccess) continue;
+				} else {
+					LOG_VERBOSE("Failed to load compiled fallback fragment.");
+				}
+			} else {
+				LOG_VERBOSE("Error while compiling fallback fragment shader: %s", shader_compiler.GetErrorMessage().data());
+			}
+		}
+		LOG_VERBOSE("Failed to create fallback pipeline, falling back to basic fragment shader.");
+		{
+			// Create from binary array code
+			std::span<const std::byte> fallback_fragment_shader_code{
+				reinterpret_cast<const std::byte*>(ShaderCodes::kFragmentFallbackDefault),
+				sizeof(ShaderCodes::kFragmentFallbackDefault),
+			};
+			CHECK_RESULT(CreatePipeline(fallback_fragment_shader_code, fallback_pipeline));
+		}
+	} while (false);
+};
+
 // auto MainAppImpl::CreatePipeline(std::string_view const fragment_shader_code) -> vk::Result {
-auto MainAppImpl::CreatePipeline(std::span<std::byte const> fragment_shader_code) -> vk::Result {
+auto MainAppImpl::CreatePipeline(std::span<std::byte const> fragment_shader_code, vk::Pipeline& pipeline) -> vk::Result {
 	vk::Result result;
 
 	vk::ShaderModuleCreateInfo shader_module_info{
@@ -504,12 +664,63 @@ auto MainAppImpl::CreatePipeline(std::span<std::byte const> fragment_shader_code
 	return vk::Result::eSuccess;
 }
 
-void MainAppImpl::DrawWindow() {
+bool MainAppImpl::RecreateUserPipeline() {
+	std::optional<std::span<const std::byte>> shader_code = shader_compiler.LoadShader(fragment_shader.path_string, gGlobalData.user_fragment_spv_path);
+	if (!shader_code.has_value()) {
+		LOG_ERROR("Error: %s", shader_compiler.GetErrorMessage().data());
+		return false;
+	}
+	if (shader_code.value().empty()) {
+		LOG_ERROR("Compiled fragment shader file is empty.");
+		return false;
+	}
+
+	vk::Pipeline new_pipeline;
+	vk::Result   result = CreatePipeline(shader_code.value(), new_pipeline);
+	// CHECK_RESULT(result);
+	if (result != vk::Result::eSuccess) {
+		return false;
+	}
+	CHECK_RESULT(device.waitIdle());
+	device.destroyPipeline(user_pipeline, GetAllocator());
+	user_pipeline = new_pipeline;
+	LOG_VERBOSE("Shader updated: %s", fragment_shader.path_string.data());
+	return true;
+};
+
+void MainAppImpl::UpdateViewport(int width, int height) {
+	if (user_options.bFlipY) {
+		viewport = {0.0f, static_cast<float>(height), static_cast<float>(width), -static_cast<float>(height), 0.0f, 1.0f};
+	} else {
+		viewport = {0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
+	}
+};
+
+void MainAppImpl::UpdateMouse(int x, int y, int height) {
+	if (user_options.bFlipY) {
+		mouse = {static_cast<float>(x), static_cast<float>(height) - y};
+	} else {
+		mouse = {static_cast<float>(x), static_cast<float>(y)};
+	}
+}
+
+void MainAppImpl::UpdateTime() {
+	auto now   = std::chrono::high_resolution_clock::now();
+	time       = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count() / 1000.0f;
+	time_delta = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_time).count() / 1000.0f;
+	last_time  = now;
+}
+
+void MainAppImpl::OnDrawWindow() {
+	int x, y, width, height;
+	window.GetRect(x, y, width, height);
+	if (width <= 0 || height <= 0) return;
+
 	auto HandleSwapchainResult = [this](vk::Result result) -> bool {
 		switch (result) {
 		case vk::Result::eSuccess:           return true;
-		case vk::Result::eErrorOutOfDateKHR: swapchain_dirty = true; return false;
-		case vk::Result::eSuboptimalKHR:     swapchain_dirty = true; return true;
+		case vk::Result::eErrorOutOfDateKHR: bSwapchainDirty = true; return false;
+		case vk::Result::eSuboptimalKHR:     bSwapchainDirty = true; return true;
 		default:
 			CHECK_RESULT(result);
 		}
@@ -519,20 +730,36 @@ void MainAppImpl::DrawWindow() {
 	CHECK_RESULT(device.resetFences(1, &swapchain.GetCurrentFence()));
 	device.resetCommandPool(swapchain.GetCurrentCommandPool());
 	if (!HandleSwapchainResult(swapchain.AcquireNextImage())) return;
+	if (user_options.bUpdateOnSave) {
+		fragment_shader.UpdateFileVersion();
+	}
+	if (fragment_shader.GetDirty()) {
+		current_pipeline = &fallback_pipeline;
+
+		static int last_recreation_attempt_file_version = -1;
+		if (last_recreation_attempt_file_version < fragment_shader.GetFileVersion()) {
+			last_recreation_attempt_file_version = fragment_shader.GetFileVersion();
+			if (RecreateUserPipeline()) {
+				fragment_shader.SetPipelineVersion(last_recreation_attempt_file_version);
+				current_pipeline = &user_pipeline;
+			}
+		}
+	}
+	UpdateTime();
 	RecordCommands();
 	if (!HandleSwapchainResult(swapchain.SubmitAndPresent(queue, queue))) return;
+	++frame_index;
 }
 
 void MainAppImpl::RecordCommands() {
 	int x, y, width, height;
 	window.GetRect(x, y, width, height);
+	vk::Rect2D render_rect{0, 0, static_cast<u32>(width), static_cast<u32>(height)};
 
-	vk::Rect2D               render_rect{0, 0, static_cast<u32>(width), static_cast<u32>(height)};
 	VulkanRHI::CommandBuffer cmd = swapchain.GetCurrentCommandBuffer();
 	CHECK_RESULT(cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
 	vk::Image swapchain_image = swapchain.GetCurrentImage();
-	// cmd.SetViewport({0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f});
-	cmd.SetViewport({0.0f, static_cast<float>(height), static_cast<float>(width), -static_cast<float>(height), 0.0f, 1.0f}); // flip
+	cmd.setViewport(0, {viewport});
 	cmd.SetScissor(render_rect);
 	cmd.Barrier({
 		.image         = swapchain_image,
@@ -551,11 +778,14 @@ void MainAppImpl::RecordCommands() {
 			.imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
 		}}},
 	});
-	cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+	cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, *current_pipeline);
 	// cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout, 0, 1, &descriptor_set, 0, nullptr);
 	PushConstants constants{
 		.resolution = {static_cast<float>(width), static_cast<float>(height)},
-		.mouse      = {mouse.x, static_cast<float>(height) - mouse.y},
+		.mouse      = {mouse.x, mouse.y},
+		.time       = time,
+		.time_delta = time_delta,
+		.frame      = frame_index,
 	};
 	cmd.pushConstants(pipeline_layout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(constants), &constants);
 	// vk::DeviceSize offsets[] = {0};
@@ -580,52 +810,190 @@ void MainAppImpl::RecreateSwapchain(int width, int height) {
 		CHECK_RESULT(device.waitForFences(1, &frame.GetFence(), vk::True, std::numeric_limits<u32>::max()));
 	}
 	CHECK_RESULT(swapchain.Recreate(width, height));
-	swapchain_dirty = false;
+	bSwapchainDirty = false;
 	// std::printf("Recr with size %dx%d\n", width, height);
 }
 
-void PrintUsage(char const* app_name) {
-	std::printf("Usage: %ls <path_to_shader> [--validation] [--verbose]\n", (std::filesystem::path(app_name)).filename().c_str());
+std::string_view const kArgs[]   = {"--validation", "--verbose", "--update-on-save", "--flip-y"};
+std::string_view const kKwargs[] = {"--file"};
+
+struct ArgParser {
+	ArgParser(int argc, char const* const* argv, UserOptions& user_options) : argv(argv), argc(argc), user_options(&user_options) {}
+	auto Parse() -> char const*;
+
+	auto GetNextArg() -> std::string_view {
+		if (curent_arg >= argc) return {};
+		return argv[curent_arg++];
+	}
+	auto IsBoolString(std::string_view const value) -> bool { return value == "true" || value == "false" || value == "1" || value == "0"; }
+	auto IsNumString(std::string_view const value) -> bool { return value.find_first_not_of("-0123456789.") == std::string_view::npos; }
+	auto ParseBoolString(std::string_view const value) -> bool { return value == "true" || value == "1"; }
+	auto IsArg(const std::string_view arg) -> bool { return arg.find("--") == 0; }
+	auto ParseKwargs(const std::string_view arg) -> char const*;
+	auto ParseBoolKwarg(const std::string_view arg,
+						const std::string_view key,
+						bool&                  value) -> char const*;
+	auto ParseNumKwarg(const std::string_view arg, const std::string_view key, int& value) -> char const*;
+
+private:
+	char const* const* argv;
+	int                argc;
+	int                curent_arg = 0;
+	UserOptions*       user_options;
+};
+
+void PrintUsage() {
+	UserOptions default_options{};
+	std::printf("Usage: %ls <fragment_shader_file> ", gGlobalData.executable_path.filename().c_str());
+	std::printf("[--help] ");
+	std::printf("[--validation=%s] ", Utils::FormatBool(default_options.bValidationEnabled).data());
+	std::printf("[--verbose=%s] ", Utils::FormatBool(default_options.bVerbose).data());
+	std::printf("[--update-on-save=%s] ", Utils::FormatBool(default_options.bUpdateOnSave).data());
+	std::printf("[--flip-y=%s] ", Utils::FormatBool(default_options.bFlipY).data());
+	std::printf("[--reset-window-state=%s] ", Utils::FormatBool(default_options.bResetWindowState).data());
+	std::printf("[--fps_limit=%f] ", default_options.fps_limit);
+	std::printf("\n");
 }
 
-auto MainAppImpl::ParseArgs(int argc, char const* const* argv) -> char const* {
-	for (std::string_view const arg : std::span(argv + 2, argc - 2)) {
-		if (arg == "--validation") bValidationEnabled = false;
-		else if (arg == "--verbose") bVerbose = true;
-		else return arg.data();
+auto ArgParser::ParseBoolKwarg(const std::string_view arg,
+							   const std::string_view key,
+							   bool&                  value) -> char const* {
+	std::string_view value_str;
+	if (arg == key) {
+		value_str = "1";
+	} else if (arg.find(key) == 0 && arg.size() > key.size() && arg[key.size()] == '=') {
+		value_str = arg.substr(key.size() + 1);
+	}
+	if (value_str.empty() || !IsBoolString(value_str)) return arg.data();
+	value = ParseBoolString(value_str);
+	return nullptr;
+};
+
+auto ArgParser::ParseNumKwarg(const std::string_view arg, const std::string_view key, int& value) -> char const* {
+	std::string_view value_str;
+	if (arg == key) {
+		value_str = "1";
+	} else if (arg.find(key) == 0 && arg.size() > key.size() && arg[key.size()] == '=') {
+		value_str = arg.substr(key.size() + 1);
+	}
+	if (value_str.empty()/*  || !IsNumString(value_str) */) return arg.data();
+	char* p_end{nullptr};
+	long  value_long = std::strtol(value_str.data(), &p_end, 10);
+	if (p_end == value_str.data() ||
+		*p_end != '\0' ||
+		value_long == std::numeric_limits<long>::min() ||
+		value_long == std::numeric_limits<long>::max()) return arg.data();
+	value = static_cast<int>(value_long);
+	return nullptr;
+}
+
+auto ArgParser::ParseKwargs(const std::string_view arg) -> char const* {
+	bool value;
+	int  value_int;
+	if (!ParseBoolKwarg(arg, "--validation", value)) user_options->bValidationEnabled = value;
+	else if (!ParseBoolKwarg(arg, "--verbose", value)) user_options->bVerbose = value;
+	else if (!ParseBoolKwarg(arg, "--update-on-save", value)) user_options->bUpdateOnSave = value;
+	else if (!ParseBoolKwarg(arg, "--flip-y", value)) user_options->bFlipY = value;
+	else if (!ParseBoolKwarg(arg, "--reset-window-state", value)) user_options->bResetWindowState = value;
+	else if (!ParseNumKwarg(arg, "--fps_limit", value_int)) {
+		if (value_int < 1) value_int = 1;
+		user_options->fps_limit = static_cast<float>(value_int);
+	} else return arg.data();
+	return nullptr;
+}
+
+auto ArgParser::Parse() -> char const* {
+	while (true) {
+		std::string_view const arg = GetNextArg();
+		if (arg.empty()) return nullptr;
+		// if (ParseFlag(arg) == nullptr) continue;
+		char const* unknown_arg = ParseKwargs(arg);
+		if (unknown_arg) return unknown_arg;
 	}
 	return nullptr;
 }
 
 void MainAppImpl::Run(int argc, char const* const* argv) {
+	for (std::string_view const arg : std::span(argv + 1, argc - 1)) {
+		if (arg == "--help") {
+			PrintUsage();
+			return;
+		}
+	}
 	if (argc < 2) {
-		PrintUsage(argv[0]);
+		PrintUsage();
+		LOG_FATAL("No fragment shader file specified\n");
+	}
+	fragment_shader.Update(argv[1]);
+
+	gGlobalData.executable_path        = std::filesystem::absolute(argv[0]);
+	gGlobalData.executable_path_string = gGlobalData.executable_path.string();
+	gGlobalData.executable_dir         = gGlobalData.executable_path.parent_path();
+	gGlobalData.executable_dir_string  = gGlobalData.executable_dir.string();
+	gGlobalData.config_dir             = gGlobalData.executable_dir_string.data();
+	gGlobalData.temp_dir               = std::filesystem::temp_directory_path();
+	gGlobalData.temp_dir_string        = gGlobalData.temp_dir.string();
+	// gGlobalData.temp_dir                   = ".";
+	// gGlobalData.temp_dir_string            = ".";
+	gGlobalData.window_state_path          = gGlobalData.config_dir + "/WindowState.ini";
+	gGlobalData.fallback_fragment_spv_path = gGlobalData.temp_dir_string + "/Fallback.frag.spv";
+	gGlobalData.user_fragment_spv_path     = gGlobalData.temp_dir_string + "/FragOutput.frag.spv";
+
+	ArgParser arg_parser(argc - 2, argv + 2, user_options);
+
+	if (char const* unknown_arg = arg_parser.Parse(); unknown_arg) {
+		LOG_ERROR("Error in argument: %s", unknown_arg);
+		PrintUsage();
 		return;
 	}
-	fragment_shader_path = argv[1];
-	if (char const* unknown_arg = ParseArgs(argc, argv); unknown_arg) {
-		std::printf("Unknown argument: %s\n", unknown_arg);
-		PrintUsage(argv[0]);
-		return;
+
+	if (user_options.bVerbose) {
+		std::printf("UserOptions:\n");
+		std::printf("  bVerbose: %s\n", Utils::FormatBool(user_options.bVerbose).data());
+		std::printf("  bFlipY: %s\n", Utils::FormatBool(user_options.bFlipY).data());
+		std::printf("  bUpdateOnSave: %s\n", Utils::FormatBool(user_options.bUpdateOnSave).data());
+		std::printf("  bValidationEnabled: %s\n", Utils::FormatBool(user_options.bValidationEnabled).data());
+		std::printf("  bResetWindowState: %s\n", Utils::FormatBool(user_options.bResetWindowState).data());
+		std::printf("  fps_limit: %f\n", user_options.fps_limit);
+		std::printf("\n");
 	}
-	// std::filesystem::current_path(std::filesystem::absolute(argv[0]).parent_path());
+
 	Init();
+	start_time = std::chrono::high_resolution_clock::now();
 	MainLoop();
+
+	window_state = WindowState::FromWindow(window);
+	window_state.SaveToFile(gGlobalData.window_state_path);
+}
+
+static std::chrono::high_resolution_clock::time_point last_frame_time = std::chrono::high_resolution_clock::now();
+void                                                  MainAppImpl::WaitForFrameTimeLeft() {
+    auto fps_limit       = user_options.fps_limit;
+    auto now             = std::chrono::high_resolution_clock::now();
+    auto elapsed         = now - last_time;
+    auto frame_time_left = std::chrono::milliseconds(1000) / fps_limit - elapsed;
+    if (frame_time_left > std::chrono::milliseconds(0)) {
+        std::this_thread::sleep_for(frame_time_left);
+    }
+    last_time = now;
 }
 
 void MainAppImpl::MainLoop() {
 	do {
-		WindowManager::WaitEvents();
+		if (bPaused) {
+			WindowManager::WaitEvents();
+		} else {
+			WindowManager::PollEvents();
+		}
+		// WindowManager::WaitEventsTimeout(0.1);
 		if (window.GetShouldClose()) break;
-		int x, y, width, height;
-		window.GetRect(x, y, width, height);
-		if (width <= 0 || height <= 0) continue;
-		DrawWindow();
+		OnDrawWindow();
+		WaitForFrameTimeLeft();
 	} while (true);
 };
 
 void MainApplication::Run(int argc, char** argv) {
 	MainAppImpl app;
-	gAppData = &app;
+	gApp = &app;
 	app.Run(argc, argv);
 }

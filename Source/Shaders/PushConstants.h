@@ -5,13 +5,19 @@
 struct PushConstants {
 	float resolution[2];
 	float mouse[2];
+	float time;
+	float time_delta;
+	int   frame;
 };
 #endif
 
 #ifdef GL_core_profile
 struct PushConstants {
-	vec2 resolution;
-	vec2 mouse;
+	vec2  resolution;
+	vec2  mouse;
+	float time;
+	float time_delta;
+	int   frame;
 };
 #endif
 
@@ -19,6 +25,9 @@ struct PushConstants {
 struct PushConstants {
 	float2 resolution;
 	float2 mouse;
+	float  time;
+	float  time_delta;
+	int    frame;
 };
 #endif
 

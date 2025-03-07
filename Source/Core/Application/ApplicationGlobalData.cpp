@@ -1,0 +1,3 @@
+module ApplicationGlobalData;
+
+ApplicationGlobalData gGlobalData;

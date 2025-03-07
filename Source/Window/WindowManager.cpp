@@ -9,6 +9,7 @@ void WindowManager::Init() { glfwInit(); }
 void WindowManager::Terminate() { glfwTerminate(); }
 void WindowManager::PollEvents() { glfwPollEvents(); }
 void WindowManager::WaitEvents() { glfwWaitEvents(); }
+void WindowManager::WaitEventsTimeout(double timeout) { glfwWaitEventsTimeout(timeout); }
 
 vk::Result WindowManager::CreateWindowSurface(vk::Instance                   instance,
 											  GLFWwindow*                    window,

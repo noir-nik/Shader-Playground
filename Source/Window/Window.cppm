@@ -6,7 +6,7 @@ export module Window;
 export import IWindow;
 export import WindowCreateInfo;
 
-struct WindowRect {
+export struct WindowRect {
 	int x, y, width, height;
 };
 
@@ -57,8 +57,8 @@ public:
 	virtual bool IsMaximized() const override;
 	virtual bool IsMinimized() const override;
 	virtual bool GetFullScreenRect(int& x, int& y, int& width, int& height) const override;
-	virtual bool GetRestoredRect(int& x, int& y, int& width, int& height) override;
-	virtual void GetRect(int& x, int& y, int& width, int& height) override;
+	virtual bool GetRestoredRect(int& x, int& y, int& width, int& height) const override;
+	virtual void GetRect(int& x, int& y, int& width, int& height) const override;
 	virtual void SetFocus() override;
 	virtual void SetOpacity(float const value) override;
 	virtual void Enable(bool bEnable) override;

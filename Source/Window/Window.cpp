@@ -1,5 +1,15 @@
 module;
 #include <GLFW/glfw3.h>
+
+#if 0
+#include <cstdio>
+#define LOG_WINDOW(fmt, ...) std::printf(fmt "\n", ##__VA_ARGS__);
+#define LOG_INPUT(fmt, ...) std::printf(fmt "\n", ##__VA_ARGS__);
+#else
+#define LOG_WINDOW(fmt, ...)
+#define LOG_INPUT(fmt, ...)
+#endif
+
 module Window;
 
 import WindowCreateInfo;
@@ -26,14 +36,23 @@ static void DropCallback(GLFWwindow* window, int path_count, char const* paths[]
 Window::Window() {}
 
 void Window::Init(WindowCreateInfo const& info) {
-	if (info.mode == WindowMode::eFullscreen) {
-		SetWindowMode(WindowMode::eFullscreen);
-		auto monitor   = glfwGetPrimaryMonitor();
+	GLFWmonitor* monitor      = nullptr;
+	this->mode                = info.mode;
+	int width                 = info.width;
+	int height                = info.height;
+	windowedDimensions.width  = width;
+	windowedDimensions.height = height;
+	if (info.mode == WindowMode::eWindowedFullscreen) {
+		monitor        = glfwGetPrimaryMonitor();
 		auto videoMode = glfwGetVideoMode(monitor);
 		glfwWindowHint(GLFW_RED_BITS, videoMode->redBits);
 		glfwWindowHint(GLFW_GREEN_BITS, videoMode->greenBits);
 		glfwWindowHint(GLFW_BLUE_BITS, videoMode->blueBits);
 		glfwWindowHint(GLFW_REFRESH_RATE, videoMode->refreshRate);
+		width  = videoMode->width;
+		height = videoMode->height;
+	} else if (info.mode == WindowMode::eFullscreen) {
+		monitor = glfwGetPrimaryMonitor();
 	}
 
 	glfwWindowHint(GLFW_RESIZABLE, info.bResizable);
@@ -43,24 +62,26 @@ void Window::Init(WindowCreateInfo const& info) {
 	glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, info.bTransparent);
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
-	window = glfwCreateWindow(info.width, info.height, info.title, nullptr, nullptr);
+	window = glfwCreateWindow(width, height, info.title, monitor, nullptr);
 	glfwSetWindowUserPointer(window, this);
 	// Set pos from info
 	int x, y;
 	glfwGetWindowPos(window, &x, &y);
 	if (info.x != kWindowDontCare) {
 		x = info.x;
+		windowedDimensions.x = info.x;
 	}
 	if (info.y != kWindowDontCare) {
 		y = info.y;
+		windowedDimensions.y = info.y;
 	}
 	if (x != kWindowDontCare || y != kWindowDontCare) {
 		glfwSetWindowPos(window, x, y);
 	}
 
 	// Get Stored Rect
-	glfwGetWindowPos(window, &windowedDimensions.x, &windowedDimensions.y);
-	glfwGetWindowSize(window, &windowedDimensions.width, &windowedDimensions.height);
+	// glfwGetWindowPos(window, &windowedDimensions.x, &windowedDimensions.y);
+	// glfwGetWindowSize(window, &windowedDimensions.width, &windowedDimensions.height);
 
 	glfwSetWindowPosCallback(window, WindowPosCallback);
 	glfwSetWindowSizeCallback(window, WindowSizeCallback);
@@ -150,14 +171,18 @@ void Window::SetWindowMode(WindowMode mode) {
 	case WindowMode::eWindowedFullscreen:
 		glfwGetWindowPos(window, &windowedDimensions.x, &windowedDimensions.y);
 		glfwGetWindowSize(window, &windowedDimensions.width, &windowedDimensions.height);
-		glfwSetWindowMonitor(window, nullptr, 0, 0, videoMode->width, videoMode->height, GLFW_DONT_CARE);
+		glfwSetWindowMonitor(window, monitor, 0, 0, videoMode->width, videoMode->height, videoMode->refreshRate);
 		break;
 	case WindowMode::eFullscreen:
 		glfwGetWindowPos(window, &windowedDimensions.x, &windowedDimensions.y);
 		glfwGetWindowSize(window, &windowedDimensions.width, &windowedDimensions.height);
-		glfwSetWindowMonitor(window, monitor, 0, 0, videoMode->width, videoMode->height, videoMode->refreshRate);
+		int x, y, width, height;
+		GetRect(x, y, width, height);
+		glfwSetWindowMonitor(window, monitor, 0, 0, width, height, videoMode->refreshRate);
 		break;
+	case WindowMode::eMaxEnum: break;
 	}
+	this->mode = mode;
 }
 
 auto Window::GetWindowMode() const -> WindowMode {
@@ -172,7 +197,11 @@ bool Window::IsMinimized() const {
 	return glfwGetWindowAttrib(window, GLFW_ICONIFIED);
 }
 
-bool Window::GetRestoredRect(int& x, int& y, int& width, int& height) {
+bool Window::GetRestoredRect(int& x, int& y, int& width, int& height) const {
+	if (mode == WindowMode::eWindowed) {
+		GetRect(x, y, width, height);
+		return true;
+	}
 	x      = windowedDimensions.x;
 	y      = windowedDimensions.y;
 	width  = windowedDimensions.width;
@@ -180,7 +209,7 @@ bool Window::GetRestoredRect(int& x, int& y, int& width, int& height) {
 	return true;
 }
 
-void Window::GetRect(int& x, int& y, int& width, int& height) {
+void Window::GetRect(int& x, int& y, int& width, int& height) const {
 	glfwGetWindowPos(window, &x, &y);
 	glfwGetWindowSize(window, &width, &height);
 }
@@ -212,15 +241,6 @@ bool Window::GetShouldClose() const {
 void Window::SetShouldClose(bool value) const {
 	glfwSetWindowShouldClose(window, value ? GLFW_TRUE : GLFW_FALSE);
 }
-
-#if 0
-#include <cstdio>
-#define LOG_WINDOW(fmt, ...) std::printf(fmt "\n", ##__VA_ARGS__);
-#define LOG_INPUT(fmt, ...) std::printf(fmt "\n", ##__VA_ARGS__);
-#else
-#define LOG_WINDOW(fmt, ...)
-#define LOG_INPUT(fmt, ...)
-#endif
 
 static void WindowPosCallback(GLFWwindow* window, int x, int y) {
 	Window* pWindow = reinterpret_cast<Window*>(glfwGetWindowUserPointer(window));
@@ -261,7 +281,6 @@ static void WindowFocusCallback(GLFWwindow* window, int focused) {
 static void WindowIconifyCallback(GLFWwindow* window, int iconified) {
 	Window* pWindow = reinterpret_cast<Window*>(glfwGetWindowUserPointer(window));
 	LOG_WINDOW("Window %p iconified %d", pWindow, iconified);
-
 	if (pWindow->GetWindowCallbacks().windowIconifyCallback)
 		pWindow->GetWindowCallbacks().windowIconifyCallback(pWindow, iconified);
 }

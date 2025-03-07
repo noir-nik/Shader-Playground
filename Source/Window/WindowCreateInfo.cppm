@@ -2,10 +2,10 @@ export module WindowCreateInfo;
 import IWindow;
 
 export struct WindowCreateInfo {
-	int x      = kWindowDontCare;
-	int y      = kWindowDontCare;
-	int width  = kWindowDontCare;
-	int height = kWindowDontCare;
+	int x = kWindowDontCare;
+	int y = kWindowDontCare;
+	int width;
+	int height;
 
 	WindowMode  mode  = WindowMode::eWindowed;
 	char const* title = "Window";
@@ -13,6 +13,6 @@ export struct WindowCreateInfo {
 	bool bResizable : 1   = true;
 	bool bDecorated : 1   = true;
 	bool bFocused : 1     = true;
-	bool bAutoIconify : 1 = false;
+	bool bAutoIconify : 1 = true;
 	bool bTransparent : 1 = false;
 };

@@ -1,10 +1,14 @@
 #pragma once
 
-#define CHECK_RESULT(func) \
+#define _CHECK_RESULT_IMPL(func, var_suffix) \
 	{ \
-		vk::Result local_result_ = (func); \
-		if (local_result_ != vk::Result::eSuccess) { \
-			std::printf("Error: %s in %s %s:%d\n", vk::to_string(local_result_).c_str(), #func, __FILE__, __LINE__); \
-			std::exit(1); \
+		vk::Result local_result_##var_suffix = (func); \
+		if (local_result_##var_suffix != vk::Result::eSuccess) { \
+			LOG_FATAL("Vulkan Error: %s in %s", vk::to_string(local_result_##var_suffix).c_str(), #func); \
 		} \
 	}
+
+// For __LINE__ macro expansion
+#define _FORWARD_CHECK_RESULT(x, y) _CHECK_RESULT_IMPL(x, y)
+
+#define CHECK_RESULT(func) _FORWARD_CHECK_RESULT(func, __LINE__)

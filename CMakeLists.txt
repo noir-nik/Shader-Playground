@@ -27,6 +27,8 @@ set(ALL_SOURCES
 
 target_sources(${PROJECT_NAME} PUBLIC ${ALL_SOURCES})
 
+# target_compile_options(${PROJECT_NAME} PRIVATE -fsanitize=address)
+# target_link_options(${PROJECT_NAME} PRIVATE -fsanitize=address)
 
 # Modules
 file(GLOB_RECURSE MODULE_SOURCES RELATIVE ${CMAKE_SOURCE_DIR} "Source/*.cppm")

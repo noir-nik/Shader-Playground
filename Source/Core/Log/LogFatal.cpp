@@ -17,5 +17,6 @@ void HandleLogFatalError(char const* file, int line, char const* fmt, ...) {
 	buffer[sizeof(buffer) - 1] = '\0';
 	// todo: Messagebox
 	LOG_MESSAGE(LogLevel::Fatal, buffer);
+	std::system("pause");
 	std::exit(1);
 }
