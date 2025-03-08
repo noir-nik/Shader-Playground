@@ -68,11 +68,11 @@ void Window::Init(WindowCreateInfo const& info) {
 	int x, y;
 	glfwGetWindowPos(window, &x, &y);
 	if (info.x != kWindowDontCare) {
-		x = info.x;
+		x                    = info.x;
 		windowedDimensions.x = info.x;
 	}
 	if (info.y != kWindowDontCare) {
-		y = info.y;
+		y                    = info.y;
 		windowedDimensions.y = info.y;
 	}
 	if (x != kWindowDontCare || y != kWindowDontCare) {
@@ -241,6 +241,8 @@ bool Window::GetShouldClose() const {
 void Window::SetShouldClose(bool value) const {
 	glfwSetWindowShouldClose(window, value ? GLFW_TRUE : GLFW_FALSE);
 }
+
+auto Window::GetMonitorRefreshRate() const -> int { return glfwGetVideoMode(glfwGetPrimaryMonitor())->refreshRate; };
 
 static void WindowPosCallback(GLFWwindow* window, int x, int y) {
 	Window* pWindow = reinterpret_cast<Window*>(glfwGetWindowUserPointer(window));

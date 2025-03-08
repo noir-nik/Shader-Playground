@@ -67,6 +67,8 @@ public:
 	virtual bool GetShouldClose() const;
 	virtual void SetShouldClose(bool value) const;
 
+	auto GetMonitorRefreshRate() const -> int;
+
 	auto GetWindowCallbacks() -> WindowCallbacks& { return callbacks; }
 	auto GetInputCallbacks() -> WindowInputCallbacks& { return inputCallbacks; }
 

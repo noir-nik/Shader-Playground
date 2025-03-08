@@ -79,13 +79,16 @@ struct FragmentShaderManager {
 	int                   pipeline_version = -1;
 };
 
+constexpr float kFpsUnlimited = 0.0f;
+
 struct UserOptions {
 	bool  bVerbose : 1           = false;
 	bool  bFlipY : 1             = true;
 	bool  bUpdateOnSave : 1      = true;
 	bool  bValidationEnabled : 1 = true;
 	bool  bResetWindowState : 1  = false;
-	float fps_limit              = 60.0f;
+	bool  bStartPaused : 1       = false;
+	float fps_limit              = -1.0f;
 };
 
 struct MainAppImpl {
@@ -117,9 +120,10 @@ struct MainAppImpl {
 	void CreatePipelineLayout();
 	void CreateVertexShaderModule();
 	void CreateFallbackPipeline();
+	bool UpdateUserFragmentShader();
 
 	[[nodiscard]] auto CreatePipeline(std::span<std::byte const> fragment_shader_code, vk::Pipeline& pipeline) -> vk::Result;
-	[[nodiscard]] bool RecreateUserPipeline();
+	[[nodiscard]] bool TryRecreateUserPipeline();
 
 	void RecordCommands();
 	void UpdateViewport(int width, int height);
@@ -141,6 +145,7 @@ struct MainAppImpl {
 	WindowState  window_state;
 	int          WindowFramesToDraw = 0;
 	vk::Viewport viewport;
+	vk::Viewport viewport_flip_y;
 	struct {
 		float x = 300.0f;
 		float y = 300.0f;
@@ -208,11 +213,28 @@ static void CursorPosCallback(Window* window, double xpos, double ypos) {
 
 static void KeyCallback(Window* window, int keycode, int scancode, int action, int mods) {
 	switch (Key(keycode)) {
-	case Key::eEscape:
+	case Key::eO: {
+		// Open file dialog
+		// if (mods & Mod::eControl && Action(action) == Action::ePress) {
+		// }
+	} break;
+	case Key::eQ: [[fallthrough]];
+	case Key::eP: {
+		if (Action(action) == Action::ePress) {
+			gApp->bPaused = !gApp->bPaused;
+		}
+	} break;
+	case Key::eY: {
+		if (Action(action) == Action::ePress) {
+			gApp->user_options.bFlipY = !gApp->user_options.bFlipY;
+			gApp->mouse.y             = gApp->viewport.height - gApp->mouse.y;
+		}
+	} break;
+	case Key::eEscape: {
 		if (Action(action) == Action::ePress) {
 			window->SetShouldClose(true);
 		}
-		break;
+	} break;
 	case Key::eF5: {
 		if (Action(action) == Action::ePress) {
 			gApp->fragment_shader.UpdateFileVersion();
@@ -226,23 +248,16 @@ static void KeyCallback(Window* window, int keycode, int scancode, int action, i
 				window->SetWindowMode(WindowMode::eWindowed);
 			}
 		}
-	}
-	case Key::eO: {
-		// Open file dialog
-		// if (mods & Mod::eControl && Action(action) == Action::ePress) {
-		// }
-	}
-	case Key::eQ: [[fallthrough]];
-	case Key::eP: {
-		if (Action(action) == Action::ePress)
-			gApp->bPaused = !gApp->bPaused;
-	}
+	} break;
 	default:
 		break;
 	}
 }
 
 void MainAppImpl::Init() {
+	if (user_options.bStartPaused) {
+		bPaused = true;
+	}
 	WindowManager::SetErrorCallback(WindowErrorCallback);
 	WindowManager::Init();
 	char        title_buffer[256];
@@ -283,6 +298,17 @@ void MainAppImpl::Init() {
 	window.GetWindowCallbacks().windowRefreshCallback   = WindowRefreshCallback;
 	window.GetInputCallbacks().cursorPosCallback        = CursorPosCallback;
 	window.GetInputCallbacks().keyCallback              = KeyCallback;
+
+	int refresh_rate = window.GetMonitorRefreshRate();
+	if (user_options.fps_limit < 0) {
+		if (refresh_rate > 0) {
+			user_options.fps_limit = static_cast<float>(refresh_rate);
+		} else {
+			user_options.fps_limit = 60.0f;
+		}
+	}
+	LOG_VERBOSE("Using refresh rate: %.1f", user_options.fps_limit);
+
 	CreateInstance();
 
 	CHECK_RESULT(WindowManager::CreateWindowSurface(instance, reinterpret_cast<GLFWwindow*>(window.GetHandle()), GetAllocator(), &surface));
@@ -307,11 +333,28 @@ void MainAppImpl::Init() {
 	CreateVertexShaderModule();
 	CreateFallbackPipeline();
 	current_pipeline = &fallback_pipeline;
-	if (RecreateUserPipeline()) {
-		fragment_shader.SetPipelineVersion(fragment_shader.GetFileVersion());
-		current_pipeline = &user_pipeline;
-	}
+	UpdateUserFragmentShader();
 }
+
+bool MainAppImpl::UpdateUserFragmentShader() {
+	if (user_options.bUpdateOnSave) {
+		fragment_shader.UpdateFileVersion();
+	}
+	if (fragment_shader.GetDirty()) {
+		current_pipeline = &fallback_pipeline;
+
+		static int last_recreation_attempt_file_version = -1;
+		if (last_recreation_attempt_file_version != fragment_shader.GetFileVersion()) {
+			last_recreation_attempt_file_version = fragment_shader.GetFileVersion();
+			if (TryRecreateUserPipeline()) {
+				fragment_shader.SetPipelineVersion(last_recreation_attempt_file_version);
+				current_pipeline = &user_pipeline;
+			}
+		}
+		return true;
+	}
+	return false;
+};
 
 MainAppImpl::~MainAppImpl() { Destroy(); }
 
@@ -406,7 +449,7 @@ void MainAppImpl::SelectPhysicalDevice() {
 		}
 	}
 
-	LOG_FATAL("No suitable physical device found\n");
+	LOG_FATAL("No suitable physical device found");
 }
 
 void MainAppImpl::GetPhysicalDeviceInfo() {
@@ -417,7 +460,7 @@ void MainAppImpl::CreateDevice() {
 
 	auto [result, index] = physical_device.GetQueueFamilyIndex({.flags = vk::QueueFlagBits::eGraphics, .surface = surface});
 	if (result != vk::Result::eSuccess || !index.has_value()) {
-		std::printf("Failed to get graphics queue family index with surface support\n");
+		LOG_ERROR("Failed to get graphics queue family index with surface support");
 		CHECK_RESULT(result);
 	}
 
@@ -664,7 +707,7 @@ auto MainAppImpl::CreatePipeline(std::span<std::byte const> fragment_shader_code
 	return vk::Result::eSuccess;
 }
 
-bool MainAppImpl::RecreateUserPipeline() {
+bool MainAppImpl::TryRecreateUserPipeline() {
 	std::optional<std::span<const std::byte>> shader_code = shader_compiler.LoadShader(fragment_shader.path_string, gGlobalData.user_fragment_spv_path);
 	if (!shader_code.has_value()) {
 		LOG_ERROR("Error: %s", shader_compiler.GetErrorMessage().data());
@@ -689,11 +732,12 @@ bool MainAppImpl::RecreateUserPipeline() {
 };
 
 void MainAppImpl::UpdateViewport(int width, int height) {
-	if (user_options.bFlipY) {
-		viewport = {0.0f, static_cast<float>(height), static_cast<float>(width), -static_cast<float>(height), 0.0f, 1.0f};
-	} else {
-		viewport = {0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
-	}
+	viewport        = {0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
+	viewport_flip_y = {0.0f, static_cast<float>(height), static_cast<float>(width), -static_cast<float>(height), 0.0f, 1.0f};
+
+	// if (user_options.bFlipY) {
+	// } else {
+	// }
 };
 
 void MainAppImpl::UpdateMouse(int x, int y, int height) {
@@ -730,24 +774,10 @@ void MainAppImpl::OnDrawWindow() {
 	CHECK_RESULT(device.resetFences(1, &swapchain.GetCurrentFence()));
 	device.resetCommandPool(swapchain.GetCurrentCommandPool());
 	if (!HandleSwapchainResult(swapchain.AcquireNextImage())) return;
-	if (user_options.bUpdateOnSave) {
-		fragment_shader.UpdateFileVersion();
-	}
-	if (fragment_shader.GetDirty()) {
-		current_pipeline = &fallback_pipeline;
-
-		static int last_recreation_attempt_file_version = -1;
-		if (last_recreation_attempt_file_version < fragment_shader.GetFileVersion()) {
-			last_recreation_attempt_file_version = fragment_shader.GetFileVersion();
-			if (RecreateUserPipeline()) {
-				fragment_shader.SetPipelineVersion(last_recreation_attempt_file_version);
-				current_pipeline = &user_pipeline;
-			}
-		}
-	}
 	UpdateTime();
 	RecordCommands();
 	if (!HandleSwapchainResult(swapchain.SubmitAndPresent(queue, queue))) return;
+	// LOG_VERBOSE("Window drawn");
 	++frame_index;
 }
 
@@ -759,7 +789,11 @@ void MainAppImpl::RecordCommands() {
 	VulkanRHI::CommandBuffer cmd = swapchain.GetCurrentCommandBuffer();
 	CHECK_RESULT(cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
 	vk::Image swapchain_image = swapchain.GetCurrentImage();
-	cmd.setViewport(0, {viewport});
+	if (user_options.bFlipY || current_pipeline == &fallback_pipeline) {
+		cmd.setViewport(0, {viewport_flip_y});
+	} else {
+		cmd.setViewport(0, {viewport});
+	}
 	cmd.SetScissor(render_rect);
 	cmd.Barrier({
 		.image         = swapchain_image,
@@ -814,8 +848,37 @@ void MainAppImpl::RecreateSwapchain(int width, int height) {
 	// std::printf("Recr with size %dx%d\n", width, height);
 }
 
-std::string_view const kArgs[]   = {"--validation", "--verbose", "--update-on-save", "--flip-y"};
-std::string_view const kKwargs[] = {"--file"};
+static std::chrono::high_resolution_clock::time_point last_frame_time = std::chrono::high_resolution_clock::now();
+
+void MainAppImpl::WaitForFrameTimeLeft() {
+	auto fps_limit = user_options.fps_limit;
+	if (fps_limit == kFpsUnlimited || fps_limit == 0) return;
+	auto now             = std::chrono::high_resolution_clock::now();
+	auto elapsed         = now - last_time;
+	auto frame_time_left = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::duration<float>(1.0f / fps_limit) - elapsed);
+	if (frame_time_left > std::chrono::milliseconds(0)) {
+		std::this_thread::sleep_for(frame_time_left);
+	}
+	last_time = now;
+}
+
+void MainAppImpl::MainLoop() {
+	do {
+		WindowManager::PollEvents();
+		// if (bPaused) {
+		// 	WindowManager::WaitEvents();
+		// } else {
+		// }
+		// WindowManager::WaitEventsTimeout(0.1);
+		if (window.GetShouldClose()) break;
+		do {
+			bool bUpdated = UpdateUserFragmentShader();
+			if (bPaused && !bUpdated) continue;
+			OnDrawWindow();
+		} while (false);
+		WaitForFrameTimeLeft();
+	} while (true);
+};
 
 struct ArgParser {
 	ArgParser(int argc, char const* const* argv, UserOptions& user_options) : argv(argv), argc(argc), user_options(&user_options) {}
@@ -851,13 +914,23 @@ void PrintUsage() {
 	std::printf("[--update-on-save=%s] ", Utils::FormatBool(default_options.bUpdateOnSave).data());
 	std::printf("[--flip-y=%s] ", Utils::FormatBool(default_options.bFlipY).data());
 	std::printf("[--reset-window-state=%s] ", Utils::FormatBool(default_options.bResetWindowState).data());
-	std::printf("[--fps_limit=%f] ", default_options.fps_limit);
+	std::printf("[--fps-limit=%f] ", default_options.fps_limit);
+	std::printf("[--start-paused=%s] ", Utils::FormatBool(default_options.bStartPaused).data());
 	std::printf("\n");
 }
 
-auto ArgParser::ParseBoolKwarg(const std::string_view arg,
-							   const std::string_view key,
-							   bool&                  value) -> char const* {
+void PrintHelp() {
+	PrintUsage();
+	std::printf("  --validation=<bool>   Enable Vulkan validation layers\n");
+	std::printf("  --verbose=<bool>      Enable verbose logging\n");
+	std::printf("  --update-on-save=<bool> Update the shader on save\n");
+	std::printf("  --flip-y=<bool>       Flip the Y axis\n");
+	std::printf("  --reset-window-state=<bool> Reset the window state\n");
+	std::printf("  --fps-limit=<float>   FPS limit. Use monitor refresh rate by default. Disable with 0\n");
+	std::printf("  --start-paused=<bool> Start paused\n");
+}
+
+auto ArgParser::ParseBoolKwarg(const std::string_view arg, const std::string_view key, bool& value) -> char const* {
 	std::string_view value_str;
 	if (arg == key) {
 		value_str = "1";
@@ -876,7 +949,7 @@ auto ArgParser::ParseNumKwarg(const std::string_view arg, const std::string_view
 	} else if (arg.find(key) == 0 && arg.size() > key.size() && arg[key.size()] == '=') {
 		value_str = arg.substr(key.size() + 1);
 	}
-	if (value_str.empty()/*  || !IsNumString(value_str) */) return arg.data();
+	if (value_str.empty() /*  || !IsNumString(value_str) */) return arg.data();
 	char* p_end{nullptr};
 	long  value_long = std::strtol(value_str.data(), &p_end, 10);
 	if (p_end == value_str.data() ||
@@ -895,8 +968,9 @@ auto ArgParser::ParseKwargs(const std::string_view arg) -> char const* {
 	else if (!ParseBoolKwarg(arg, "--update-on-save", value)) user_options->bUpdateOnSave = value;
 	else if (!ParseBoolKwarg(arg, "--flip-y", value)) user_options->bFlipY = value;
 	else if (!ParseBoolKwarg(arg, "--reset-window-state", value)) user_options->bResetWindowState = value;
-	else if (!ParseNumKwarg(arg, "--fps_limit", value_int)) {
-		if (value_int < 1) value_int = 1;
+	else if (!ParseBoolKwarg(arg, "--start-paused", value)) user_options->bStartPaused = value;
+	else if (!ParseNumKwarg(arg, "--fps-limit", value_int)) {
+		if (value_int < 0) value_int = -1;
 		user_options->fps_limit = static_cast<float>(value_int);
 	} else return arg.data();
 	return nullptr;
@@ -914,18 +988,6 @@ auto ArgParser::Parse() -> char const* {
 }
 
 void MainAppImpl::Run(int argc, char const* const* argv) {
-	for (std::string_view const arg : std::span(argv + 1, argc - 1)) {
-		if (arg == "--help") {
-			PrintUsage();
-			return;
-		}
-	}
-	if (argc < 2) {
-		PrintUsage();
-		LOG_FATAL("No fragment shader file specified\n");
-	}
-	fragment_shader.Update(argv[1]);
-
 	gGlobalData.executable_path        = std::filesystem::absolute(argv[0]);
 	gGlobalData.executable_path_string = gGlobalData.executable_path.string();
 	gGlobalData.executable_dir         = gGlobalData.executable_path.parent_path();
@@ -938,6 +1000,19 @@ void MainAppImpl::Run(int argc, char const* const* argv) {
 	gGlobalData.window_state_path          = gGlobalData.config_dir + "/WindowState.ini";
 	gGlobalData.fallback_fragment_spv_path = gGlobalData.temp_dir_string + "/Fallback.frag.spv";
 	gGlobalData.user_fragment_spv_path     = gGlobalData.temp_dir_string + "/FragOutput.frag.spv";
+
+	for (std::string_view const arg : std::span(argv + 1, argc - 1)) {
+		if (arg == "--help") {
+			PrintHelp();
+			return;
+		}
+	}
+	if (argc < 2) {
+		LOG_ERROR("No fragment shader file specified");
+		PrintUsage();
+		return;
+	}
+	fragment_shader.Update(argv[1]);
 
 	ArgParser arg_parser(argc - 2, argv + 2, user_options);
 
@@ -954,7 +1029,8 @@ void MainAppImpl::Run(int argc, char const* const* argv) {
 		std::printf("  bUpdateOnSave: %s\n", Utils::FormatBool(user_options.bUpdateOnSave).data());
 		std::printf("  bValidationEnabled: %s\n", Utils::FormatBool(user_options.bValidationEnabled).data());
 		std::printf("  bResetWindowState: %s\n", Utils::FormatBool(user_options.bResetWindowState).data());
-		std::printf("  fps_limit: %f\n", user_options.fps_limit);
+		std::printf("  fps-limit: %.1f\n", user_options.fps_limit);
+		std::printf("  start-paused: %s\n", Utils::FormatBool(user_options.bStartPaused).data());
 		std::printf("\n");
 	}
 
@@ -965,32 +1041,6 @@ void MainAppImpl::Run(int argc, char const* const* argv) {
 	window_state = WindowState::FromWindow(window);
 	window_state.SaveToFile(gGlobalData.window_state_path);
 }
-
-static std::chrono::high_resolution_clock::time_point last_frame_time = std::chrono::high_resolution_clock::now();
-void                                                  MainAppImpl::WaitForFrameTimeLeft() {
-    auto fps_limit       = user_options.fps_limit;
-    auto now             = std::chrono::high_resolution_clock::now();
-    auto elapsed         = now - last_time;
-    auto frame_time_left = std::chrono::milliseconds(1000) / fps_limit - elapsed;
-    if (frame_time_left > std::chrono::milliseconds(0)) {
-        std::this_thread::sleep_for(frame_time_left);
-    }
-    last_time = now;
-}
-
-void MainAppImpl::MainLoop() {
-	do {
-		if (bPaused) {
-			WindowManager::WaitEvents();
-		} else {
-			WindowManager::PollEvents();
-		}
-		// WindowManager::WaitEventsTimeout(0.1);
-		if (window.GetShouldClose()) break;
-		OnDrawWindow();
-		WaitForFrameTimeLeft();
-	} while (true);
-};
 
 void MainApplication::Run(int argc, char** argv) {
 	MainAppImpl app;
