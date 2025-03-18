@@ -13,4 +13,8 @@ export struct WindowState {
 	int        width  = kWindowDontCare;
 	int        height = kWindowDontCare;
 	WindowMode mode   = WindowMode::eMaxEnum;
+
+	bool bDecorated   = true;
+	bool bTransparent = false;
+	bool bFloating    = false;
 };

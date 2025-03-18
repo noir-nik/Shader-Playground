@@ -15,4 +15,5 @@ export struct WindowCreateInfo {
 	bool bFocused : 1     = true;
 	bool bAutoIconify : 1 = true;
 	bool bTransparent : 1 = false;
+	bool bFloating : 1 = false;
 };

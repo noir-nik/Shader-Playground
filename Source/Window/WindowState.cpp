@@ -1,13 +1,65 @@
+module;
+#include <GLFW/glfw3.h>
 module WindowState;
 import std;
 import IWindow;
 import Window;
-import ParseUtils;
+
+static constexpr inline auto FormatBool(bool value) -> std::string_view { return value ? "true" : "false"; };
+
+static auto ParseInt(std::string_view const line, std::string_view const key, int& value) -> bool {
+	if (std::size_t pos = line.find(key); pos == 0) {
+		std::size_t num_read = std::sscanf(line.data() + pos + std::size(key), "%d", &value);
+		if (num_read == 1) return true;
+	}
+	return false;
+};
+
+static auto StripWhitespace(std::string_view const str) -> std::string_view {
+	constexpr std::string_view kWhitespaces = " \t\n\r\f\v";
+
+	return std::string_view(
+		str.data() + str.find_first_not_of(kWhitespaces),
+		str.data() + str.find_last_not_of(kWhitespaces) + 1);
+}
+
+static auto ParseBool(std::string_view const line, std::string_view const key, bool& value) -> bool {
+	if (std::size_t pos = line.find(key); pos == 0) {
+		std::string_view substr        = line.substr(pos + std::size(key));
+		std::string_view stripped      = StripWhitespace(substr);
+		bool             bValueIsTrue  = stripped == "true" || stripped == "1";
+		bool             bValueIsFalse = stripped == "false" || stripped == "0";
+		if (bValueIsTrue || bValueIsFalse) {
+			value = bValueIsTrue;
+			return true;
+		}
+	}
+	return false;
+};
+
+static auto ParseString(std::string_view const line, std::string_view const key, std::string_view& value) -> bool {
+	if (std::size_t pos = line.find(key); pos == 0) {
+		value = StripWhitespace(line.substr(pos + std::size(key)));
+		return true;
+	}
+	return false;
+};
 
 auto WindowState::FromWindow(Window const& window) -> WindowState {
 	int x, y, width, height;
 	window.GetRestoredRect(x, y, width, height);
-	return WindowState{x, y, width, height, window.GetWindowMode()};
+	bool bTransparent = glfwGetWindowAttrib(reinterpret_cast<GLFWwindow*>(window.GetHandle()), GLFW_TRANSPARENT_FRAMEBUFFER);
+	bool bDecorated   = glfwGetWindowAttrib(reinterpret_cast<GLFWwindow*>(window.GetHandle()), GLFW_DECORATED);
+	bool bFloating    = glfwGetWindowAttrib(reinterpret_cast<GLFWwindow*>(window.GetHandle()), GLFW_FLOATING);
+	return WindowState{
+		.x            = x,
+		.y            = y,
+		.width        = width,
+		.height       = height,
+		.mode         = window.GetWindowMode(),
+		.bDecorated   = bDecorated,
+		.bTransparent = bTransparent,
+		.bFloating    = bFloating};
 }
 
 bool WindowState::SaveToFile(std::string_view file_path) {
@@ -19,6 +71,9 @@ bool WindowState::SaveToFile(std::string_view file_path) {
 		std::fprintf(config_file, "width=%d\n", width);
 		std::fprintf(config_file, "height=%d\n", height);
 		std::fprintf(config_file, "mode=%s\n", WindowModeToString(mode));
+		std::fprintf(config_file, "decorated=%d\n", bDecorated);
+		std::fprintf(config_file, "transparent=%d\n", bTransparent);
+		std::fprintf(config_file, "floating=%d\n", bFloating);
 		std::fclose(config_file);
 		return true;
 	}
@@ -33,15 +88,18 @@ constexpr inline auto WindowModeFromString(std::string_view str) -> WindowMode {
 }
 
 [[nodiscard]] bool ParseLine(WindowState& window_state, std::string_view& line) {
-	if (Utils::ParseInt(line, "x=", window_state.x) ||
-		Utils::ParseInt(line, "y=", window_state.y) ||
-		Utils::ParseInt(line, "width=", window_state.width) ||
-		Utils::ParseInt(line, "height=", window_state.height)) {
+	if (ParseInt(line, "x=", window_state.x) ||
+		ParseInt(line, "y=", window_state.y) ||
+		ParseInt(line, "width=", window_state.width) ||
+		ParseInt(line, "height=", window_state.height) ||
+		ParseBool(line, "decorated=", window_state.bDecorated) ||
+		ParseBool(line, "transparent=", window_state.bTransparent) ||
+		ParseBool(line, "floating=", window_state.bFloating)) {
 		return true;
 	};
 
 	std::string_view mode;
-	if (Utils::ParseString(line, "mode=", mode)) {
+	if (ParseString(line, "mode=", mode)) {
 		if (mode.find("WindowedFullscreen") == 0) {
 			window_state.mode = WindowMode::eWindowedFullscreen;
 			return true;

@@ -48,8 +48,8 @@ target_compile_features(
 
 
 find_package(Vulkan REQUIRED)
-if( ${Vulkan_VERSION} VERSION_LESS "1.3.296" )
-message( FATAL_ERROR "Minimum required Vulkan version for C++ modules is 1.3.296. Found ${Vulkan_VERSION}.")
+if( ${Vulkan_VERSION} VERSION_LESS "1.3.256" )
+message( FATAL_ERROR "Minimum required Vulkan version for C++ modules is 1.3.256. Found ${Vulkan_VERSION}.")
 endif()
 
 set(VULKAN_HPP_DEFINITIONS

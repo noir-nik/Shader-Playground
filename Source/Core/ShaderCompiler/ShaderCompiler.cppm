@@ -5,15 +5,12 @@ import std;
 export class ShaderCompiler {
 public:
 	~ShaderCompiler();
-	bool Init();
-	void Destroy();
-	// [[nodiscard]] auto LoadShader(std::string_view path) -> std::optional<std::string_view>;
-	[[nodiscard]] bool CompileShader(std::string_view path, std::string_view output_file_path);
-	[[nodiscard]] auto LoadShader(std::string_view path, std::string_view output_file_path) -> std::optional<std::span<std::byte const>>;
+	bool               Init();
+	void               Destroy();
+	[[nodiscard]] bool CompileShader(std::string_view path, std::string_view output_file_path, std::string_view compile_options = "");
 	auto               GetErrorMessage() -> std::string_view;
 
 private:
-	std::vector<std::byte> shader_code;
-	char                   error_buffer[1024];
-	std::uint32_t          error_size = 0;
+	std::vector<std::byte> buffer;
+	
 };
