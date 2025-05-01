@@ -1018,7 +1018,7 @@ private:
 
 void PrintUsage() {
 	UserOptions default_options{};
-	std::printf("Usage: %ls <fragment_shader_file> ", gGlobalData.executable_path.filename().c_str());
+	std::printf("Usage: %s <fragment_shader_file> ", gGlobalData.executable_path.filename().string().c_str());
 	std::printf("[--help] ");
 	std::printf("[--validation=%s] ", Utils::FormatBool(default_options.bValidationEnabled).data());
 	std::printf("[--verbose=%s] ", Utils::FormatBool(default_options.bVerbose).data());

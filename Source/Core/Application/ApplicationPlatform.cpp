@@ -39,7 +39,7 @@ auto GetTempDirectory() -> char const* {
 		if (!path) path = std::getenv("TEMP");
 		if (!path) path = "C:\\Windows\\Temp";
     #elif __linux__ || __APPLE__
-        const char* path = getenv("TMPDIR");
+        path = std::getenv("TMPDIR");
         if (!path) path = "/tmp";
     #else
         path = "./tmp";
